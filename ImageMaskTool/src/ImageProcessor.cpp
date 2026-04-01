@@ -166,6 +166,12 @@ bool ImageProcessor::loadMask(const QString& maskPath, bool invertAlpha)
     return !m_maskImage.isNull();
 }
 
+bool ImageProcessor::loadBase(const QString& basePath, bool invertAlpha)
+{
+    m_baseImage = loadImageHelper(basePath, invertAlpha);
+    return !m_baseImage.isNull();
+}
+
 QImage ImageProcessor::loadImageHelper(const QString& path, bool invertAlpha)
 {
     QFileInfo fi(path);
@@ -205,9 +211,22 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
         return "无法加载图片 (可能缺少格式插件): " + QFileInfo(inputPath).fileName();
     }
 
+    if (m_baseImage.isNull()) {
+        return "底图未加载。";
+    }
+
+    if (m_maskImage.isNull()) {
+        return "遮罩未加载。";
+    }
+
     // Convert to ARGB32_Premultiplied for best rendering performance
     if (inputImg.format() != QImage::Format_ARGB32_Premultiplied) {
         inputImg = inputImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    }
+
+    QImage baseImg = m_baseImage.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    if (baseImg.format() != QImage::Format_ARGB32_Premultiplied) {
+        baseImg = baseImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     }
 
     // Scale mask to fit input image
@@ -233,22 +252,24 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
         scaledMask = alphaChannelMask;
     }
 
-    QPainter painter(&inputImg);
+    QImage resultImg = baseImg;
+    QPainter painter(&resultImg);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.setRenderHint(QPainter::Antialiasing);
 
+    // Layer order: Base (bottom) -> Original -> Mask (top).
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.drawImage(0, 0, baseImg);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.drawImage(0, 0, inputImg);
+
     if (blendMode == 0) { // Alpha Mask Mode (DestinationIn)
-        // Handle explicit Alpha Masking logic
-        // scaledMask now guaranteed to have Alpha if it was grayscale.
-        
-        QImage effectiveMask = scaledMask;
-        
-        // DestinationIn: The output alpha is the result of the source alpha.
+        // Top mask controls final alpha of the current stack.
         painter.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-        painter.drawImage(0, 0, effectiveMask);
+        painter.drawImage(0, 0, scaledMask);
         
     } else {
-         // Apply requested blending mode
+         // Draw mask as the top layer with selected blend mode.
          switch (blendMode) {
             case 1: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break; // Normal
             case 2: painter.setCompositionMode(QPainter::CompositionMode_Multiply); break;   // Multiply
@@ -260,21 +281,17 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
             default: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break;
          }
          
-         // Ensure mask is same format or compatible
          if (scaledMask.format() != QImage::Format_ARGB32_Premultiplied) {
              scaledMask = scaledMask.convertToFormat(QImage::Format_ARGB32_Premultiplied);
          }
-         
          painter.drawImage(0, 0, scaledMask);
     }
     
     painter.end();
 
-    painter.end();
-
     // Custom TGA Writer Logic
     if (outputPath.endsWith(".tga", Qt::CaseInsensitive)) {
-        QImage saveImg = inputImg;
+        QImage saveImg = resultImg;
         
         // Ensure format is ARGB32 (non-premultiplied)
         if (saveImg.format() != QImage::Format_ARGB32) {
@@ -319,7 +336,7 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
 
     } else if (outputPath.endsWith(".blp", Qt::CaseInsensitive)) {
         // Use custom BLP Writer
-         QImage saveImg = inputImg;
+         QImage saveImg = resultImg;
          BlpReader blpWriter;
          if (blpWriter.write(saveImg, outputPath)) {
              return QString();
@@ -329,7 +346,7 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
 
     } else {
         // Standard save for other formats
-        if (inputImg.save(outputPath)) {
+        if (resultImg.save(outputPath)) {
             return QString();
         } else {
             return "写入文件失败: " + outputPath;

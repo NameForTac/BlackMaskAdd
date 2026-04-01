@@ -147,6 +147,18 @@ void MainWindow::setupUi()
     sourceLayout->addWidget(m_maskFileEdit, 3, 1);
     sourceLayout->addWidget(browseMaskBtn, 3, 2);
 
+    // Base File Row
+    QLabel* baseLabel = new QLabel("底图文件:");
+    baseLabel->setFixedWidth(90);
+    m_baseFileEdit = new QLineEdit();
+    m_baseFileEdit->setPlaceholderText("拖入 base.png 图片...");
+    connect(m_baseFileEdit, &QLineEdit::textChanged, this, &MainWindow::updatePreview);
+    QPushButton* browseBaseBtn = new QPushButton("浏览");
+    connect(browseBaseBtn, &QPushButton::clicked, this, &MainWindow::browseBaseFile);
+    sourceLayout->addWidget(baseLabel, 4, 0);
+    sourceLayout->addWidget(m_baseFileEdit, 4, 1);
+    sourceLayout->addWidget(browseBaseBtn, 4, 2);
+
     contentGrid->addWidget(sourceCard, 0, 0, 1, 2); // Row 0, Span 2 cols
 
     // 2. CARD: Preview (New Card)
@@ -172,26 +184,32 @@ void MainWindow::setupUi()
     };
 
     QVBoxLayout* p1 = new QVBoxLayout(); 
-    p1->addWidget(new QLabel("原图 (Sample)"), 0, Qt::AlignCenter);
+    p1->addWidget(new QLabel("底图 (Base)"), 0, Qt::AlignCenter);
     m_previewOriginal = createPreviewLabel("等待载入...");
     p1->addWidget(m_previewOriginal, 0, Qt::AlignCenter);
     
     QVBoxLayout* p2 = new QVBoxLayout();
-    p2->addWidget(new QLabel("遮罩 (Mask)"), 0, Qt::AlignCenter);
-    m_previewMask = createPreviewLabel("等待载入...");
-    p2->addWidget(m_previewMask, 0, Qt::AlignCenter);
+    p2->addWidget(new QLabel("原图 (Sample)"), 0, Qt::AlignCenter);
+    m_previewBase = createPreviewLabel("等待载入...");
+    p2->addWidget(m_previewBase, 0, Qt::AlignCenter);
 
     QVBoxLayout* p3 = new QVBoxLayout();
-    p3->addWidget(new QLabel("结果 (Result)"), 0, Qt::AlignCenter);
+    p3->addWidget(new QLabel("遮罩 (Mask)"), 0, Qt::AlignCenter);
+    m_previewMask = createPreviewLabel("等待载入...");
+    p3->addWidget(m_previewMask, 0, Qt::AlignCenter);
+
+    QVBoxLayout* p4 = new QVBoxLayout();
+    p4->addWidget(new QLabel("结果 (Result)"), 0, Qt::AlignCenter);
     m_previewResult = createPreviewLabel("等待处理...");
-    p3->addWidget(m_previewResult, 0, Qt::AlignCenter);
+    p4->addWidget(m_previewResult, 0, Qt::AlignCenter);
 
     previewImagesLayout->addLayout(p1);
-    // Add arrow or symbol?
     previewImagesLayout->addWidget(new QLabel("+"), 0, Qt::AlignCenter);
     previewImagesLayout->addLayout(p2);
-    previewImagesLayout->addWidget(new QLabel("="), 0, Qt::AlignCenter);
+    previewImagesLayout->addWidget(new QLabel("+"), 0, Qt::AlignCenter);
     previewImagesLayout->addLayout(p3);
+    previewImagesLayout->addWidget(new QLabel("="), 0, Qt::AlignCenter);
+    previewImagesLayout->addLayout(p4);
 
     previewLayout->addLayout(previewImagesLayout);
     contentGrid->addWidget(previewCard, 1, 0, 1, 2); // Row 1, Span 2 cols
@@ -338,6 +356,7 @@ void MainWindow::browseInputFolder()
     QString dir = QFileDialog::getExistingDirectory(this, "选择输入文件夹");
     if (!dir.isEmpty()) {
         m_inputFolderEdit->setText(dir);
+        updateSampleImage();
     }
 }
 
@@ -346,6 +365,14 @@ void MainWindow::browseMaskFile()
     QString file = QFileDialog::getOpenFileName(this, "选择遮罩文件", QString(), "Images (*.png *.jpg *.bmp *.tga *.blp)");
     if (!file.isEmpty()) {
         m_maskFileEdit->setText(file);
+    }
+}
+
+void MainWindow::browseBaseFile()
+{
+    QString file = QFileDialog::getOpenFileName(this, "选择底图文件", QString(), "Images (*.png *.jpg *.bmp *.tga *.blp)");
+    if (!file.isEmpty()) {
+        m_baseFileEdit->setText(file);
     }
 }
 
@@ -385,12 +412,16 @@ void MainWindow::updatePreview()
     // Check requirements
     if (m_sampleImagePath.isEmpty()) {
         m_previewOriginal->setText("无样本");
+        m_previewBase->setText("无底图");
+        m_previewMask->setText("无遮罩");
         m_previewResult->setText("请选择\n输入文件夹");
         return;
     }
     
     QString maskPath = m_maskFileEdit->text();
+    QString basePath = m_baseFileEdit->text();
     if (maskPath.isEmpty() || !QFile::exists(maskPath)) {
+        m_previewBase->setText("等待底图");
         m_previewMask->setText("无遮罩");
         m_previewResult->setText("请选择\n遮罩文件");
         // Load original anyway
@@ -405,6 +436,12 @@ void MainWindow::updatePreview()
         } else {
              m_previewOriginal->setText("加载失败");
         }
+        return;
+    }
+
+    if (basePath.isEmpty() || !QFile::exists(basePath)) {
+        m_previewBase->setText("无底图");
+        m_previewResult->setText("请选择\n底图文件");
         return;
     }
 
@@ -456,6 +493,13 @@ void MainWindow::updatePreview()
         } else {
             maskImg.load(maskPath);
         }
+
+        QImage baseImg;
+        if (basePath.endsWith(".tga", Qt::CaseInsensitive)) {
+            baseImg = ImageProcessor::loadTGA(basePath, invertTga);
+        } else {
+            baseImg.load(basePath);
+        }
         
         // Process
         if (inputImg.format() != QImage::Format_ARGB32_Premultiplied)
@@ -476,16 +520,28 @@ void MainWindow::updatePreview()
             scaledMask = alphaChannelMask;
         }
 
-        QImage resultImg = inputImg;
+        if (baseImg.isNull()) return;
+
+        if (baseImg.format() != QImage::Format_ARGB32_Premultiplied)
+            baseImg = baseImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        baseImg = baseImg.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+        QImage resultImg = baseImg;
         QPainter painter(&resultImg);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
         painter.setRenderHint(QPainter::Antialiasing);
+
+        // Layer order: Base -> Original -> Mask
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.drawImage(0, 0, baseImg);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        painter.drawImage(0, 0, inputImg);
 
         if (blendMode == 0) { // Alpha Mask
              painter.setCompositionMode(QPainter::CompositionMode_DestinationIn);
              painter.drawImage(0, 0, scaledMask);
         } else {
-             // ... Map blend modes
+               // ... Map blend modes
              switch (blendMode) {
                 case 1: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break;
                 case 2: painter.setCompositionMode(QPainter::CompositionMode_Multiply); break;
@@ -505,7 +561,8 @@ void MainWindow::updatePreview()
 
         // Update UI
         QMetaObject::invokeMethod(this, [=]() {
-            m_previewOriginal->setPixmap(QPixmap::fromImage(inputImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            m_previewOriginal->setPixmap(QPixmap::fromImage(baseImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            m_previewBase->setPixmap(QPixmap::fromImage(inputImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
             m_previewMask->setPixmap(QPixmap::fromImage(maskImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
             m_previewResult->setPixmap(QPixmap::fromImage(resultImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
         });
@@ -518,6 +575,7 @@ void MainWindow::startProcessing(void)
     QString folderPath = m_inputFolderEdit->text();
     QString outputFolder = m_outputFolderEdit->text(); // New
     QString maskPath = m_maskFileEdit->text();
+    QString basePath = m_baseFileEdit->text();
     QString prefix = m_prefixEdit->text();
     QString suffix = m_suffixEdit->text();
     int formatIndex = m_outputFormatCombo->currentIndex();
@@ -540,6 +598,11 @@ void MainWindow::startProcessing(void)
 
     if (maskPath.isEmpty() || !QFile::exists(maskPath)) {
         QMessageBox::warning(this, "错误", "无效的遮罩文件");
+        return;
+    }
+
+    if (basePath.isEmpty() || !QFile::exists(basePath)) {
+        QMessageBox::warning(this, "错误", "无效的底图文件");
         return;
     }
 
@@ -568,10 +631,19 @@ void MainWindow::startProcessing(void)
              return;
         }
 
+        if (!processor.loadBase(basePath, invertTga)) {
+            QMetaObject::invokeMethod(this, [=]() {
+                log("错误: 无法加载底图文件。");
+                m_startBtn->setEnabled(true);
+            });
+            return;
+        }
+
         for (const QFileInfo& info : fileList) {
             // Updated logic to use outDir
              // Skip mask file itself if it's in the same folder AND we are writing deep into same folder
             if (info.absoluteFilePath() == QFileInfo(maskPath).absoluteFilePath()) continue;
+            if (info.absoluteFilePath() == QFileInfo(basePath).absoluteFilePath()) continue;
 
             QString relPath = info.fileName();
             QString baseName = info.completeBaseName();
@@ -615,28 +687,96 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 void MainWindow::dropEvent(QDropEvent *event)
 {
     const QMimeData* mimeData = event->mimeData();
-    if (mimeData->hasUrls()) {
-        QList<QUrl> urlList = mimeData->urls();
-        for (const QUrl& url : urlList) {
-            QString path = url.toLocalFile();
-            QFileInfo fi(path);
-            
-            if (fi.isDir()) {
+    if (!mimeData->hasUrls()) {
+        return;
+    }
+
+    auto isSupportedImage = [](const QFileInfo& fi) {
+        const QString ext = fi.suffix().toLower();
+        return fi.isFile() && (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "bmp" || ext == "tga" || ext == "blp");
+    };
+
+    QWidget* dropTarget = childAt(event->position().toPoint());
+    auto droppedOnLineEdit = [dropTarget](QLineEdit* edit) {
+        return dropTarget && (dropTarget == edit || edit->isAncestorOf(dropTarget));
+    };
+
+    bool droppedOnMask = droppedOnLineEdit(m_maskFileEdit);
+    bool droppedOnBase = droppedOnLineEdit(m_baseFileEdit);
+    bool droppedOnInput = droppedOnLineEdit(m_inputFolderEdit);
+    bool droppedOnOutput = droppedOnLineEdit(m_outputFolderEdit);
+
+    QList<QUrl> urlList = mimeData->urls();
+    QStringList imagePaths;
+    bool inputFolderChanged = false;
+
+    for (const QUrl& url : urlList) {
+        const QString path = url.toLocalFile();
+        QFileInfo fi(path);
+        if (fi.isDir()) {
+            if (droppedOnOutput) {
+                m_outputFolderEdit->setText(path);
+                log("已设定输出文件夹: " + path);
+            } else if (droppedOnInput) {
                 m_inputFolderEdit->setText(path);
                 log("已设定输入文件夹: " + path);
-                updateSampleImage(); // Trigger preview
-            } else if (fi.isFile()) {
-                QString ext = fi.suffix().toLower();
-                if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "bmp" || ext == "tga" || ext == "blp") {
-                    m_maskFileEdit->setText(path);
-                    log("已设定遮罩文件: " + path);
-                    // TextChanged might catch this or we might need manual trigger if setText doesn't
-                    // Programmatic setText DOES NOT trigger textChanged usually? Actually check doc.
-                    // QLineEdit::setText usually does specific things.
-                    // Let's force update
+                inputFolderChanged = true;
+            } else if (m_inputFolderEdit->text().isEmpty()) {
+                m_inputFolderEdit->setText(path);
+                log("已设定输入文件夹: " + path);
+                inputFolderChanged = true;
+            } else if (m_outputFolderEdit->text().isEmpty()) {
+                m_outputFolderEdit->setText(path);
+                log("已设定输出文件夹: " + path);
+            } else {
+                m_inputFolderEdit->setText(path);
+                log("已设定输入文件夹: " + path);
+                inputFolderChanged = true;
+            }
+            continue;
+        }
+
+        if (isSupportedImage(fi)) {
+            imagePaths << fi.absoluteFilePath();
+        }
+    }
+
+    if (!imagePaths.isEmpty()) {
+        if (imagePaths.size() == 1 && droppedOnMask) {
+            m_maskFileEdit->setText(imagePaths.first());
+            log("已设定遮罩文件: " + imagePaths.first());
+        } else if (imagePaths.size() == 1 && droppedOnBase) {
+            m_baseFileEdit->setText(imagePaths.first());
+            log("已设定底图文件: " + imagePaths.first());
+        } else {
+            for (const QString& imagePath : imagePaths) {
+                const QString name = QFileInfo(imagePath).fileName().toLower();
+
+                if (name.contains("mask") || name.contains("alpha")) {
+                    m_maskFileEdit->setText(imagePath);
+                    log("已设定遮罩文件: " + imagePath);
+                    continue;
+                }
+                if (name.contains("base") || name.contains("background") || name.contains("底图")) {
+                    m_baseFileEdit->setText(imagePath);
+                    log("已设定底图文件: " + imagePath);
+                    continue;
+                }
+
+                if (m_baseFileEdit->text().isEmpty() || droppedOnBase) {
+                    m_baseFileEdit->setText(imagePath);
+                    log("已设定底图文件: " + imagePath);
+                } else {
+                    m_maskFileEdit->setText(imagePath);
+                    log("已设定遮罩文件: " + imagePath);
                 }
             }
         }
-        event->acceptProposedAction();
     }
+
+    if (inputFolderChanged || droppedOnInput) {
+        updateSampleImage();
+    }
+    updatePreview();
+    event->acceptProposedAction();
 }

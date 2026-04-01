@@ -11,6 +11,9 @@ public:
     // Loads the mask into memory
     bool loadMask(const QString& maskPath, bool invertAlpha = false);
 
+    // Loads the base image into memory
+    bool loadBase(const QString& basePath, bool invertAlpha = false);
+
     // Processes a single image file
     // Returns empty string if success, error message otherwisew
     // blendMode: compatible with QPainter::CompositionMode or custom logic
@@ -22,6 +25,7 @@ public:
 
 private:
     QImage m_maskImage;
+    QImage m_baseImage;
     
     // Helper to load image texturing specifically dealing with BLP if needed
     QImage loadImageHelper(const QString& path, bool invertAlpha = false);

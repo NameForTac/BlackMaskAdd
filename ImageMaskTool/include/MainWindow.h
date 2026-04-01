@@ -26,6 +26,7 @@ private slots:
     void browseInputFolder();
     void browseOutputFolder();
     void browseMaskFile();
+    void browseBaseFile();
     void startProcessing();
     void updatePreview();
 
@@ -37,6 +38,7 @@ private:
     QLineEdit* m_inputFolderEdit;
     QLineEdit* m_outputFolderEdit;
     QLineEdit* m_maskFileEdit;
+    QLineEdit* m_baseFileEdit;
     QLineEdit* m_prefixEdit;
     QLineEdit* m_suffixEdit;
     QComboBox* m_outputFormatCombo;
@@ -49,6 +51,7 @@ private:
     // Preview
     QString m_sampleImagePath;
     QLabel* m_previewOriginal;
+    QLabel* m_previewBase;
     QLabel* m_previewMask;
     QLabel* m_previewResult;
 };
