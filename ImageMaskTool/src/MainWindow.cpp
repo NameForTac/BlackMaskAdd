@@ -6,6 +6,7 @@
 #include <QGridLayout>
 #include <QFrame>
 #include <QLabel>
+#include <QApplication>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QDir>
@@ -22,9 +23,17 @@
 #include <QPainter>
 #include <QImage>
 #include <QPixmap>
+#include <QScrollArea>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QEvent>
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QFormLayout>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
+    , m_currentDropTarget(nullptr)
 {
     setupUi();
     setAcceptDrops(true);
@@ -58,6 +67,7 @@ void MainWindow::setupUi()
         // Inputs
         "QLineEdit { border: 1px solid %4; border-radius: 4px; padding: 6px; background-color: #FFFFFF; selection-background-color: %5; }"
         "QLineEdit:focus { border-color: %5; }"
+        "QLineEdit[dropTarget=\"true\"] { border: 2px solid %5; background-color: #ECF5FF; }"
         "QComboBox { border: 1px solid %4; border-radius: 4px; padding: 6px; background-color: #FFFFFF; }"
         "QComboBox::drop-down { border: none; width: 24px; }"
         
@@ -86,9 +96,21 @@ void MainWindow::setupUi()
 
     QWidget* centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
-    
+
+    QVBoxLayout* rootLayout = new QVBoxLayout(centralWidget);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
+
+    QScrollArea* scrollArea = new QScrollArea();
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    rootLayout->addWidget(scrollArea);
+
+    QWidget* contentWidget = new QWidget();
+    scrollArea->setWidget(contentWidget);
+
     // Main Layout
-    QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
+    QVBoxLayout* mainLayout = new QVBoxLayout(contentWidget);
     mainLayout->setContentsMargins(20, 20, 20, 20);
     mainLayout->setSpacing(16);
 
@@ -201,6 +223,10 @@ void MainWindow::setupUi()
     QVBoxLayout* p4 = new QVBoxLayout();
     p4->addWidget(new QLabel("结果 (Result)"), 0, Qt::AlignCenter);
     m_previewResult = createPreviewLabel("等待处理...");
+    m_previewResult->setFixedSize(256, 256);
+    m_previewResult->setCursor(Qt::PointingHandCursor);
+    m_previewResult->setToolTip("双击查看放大预览");
+    m_previewResult->installEventFilter(this);
     p4->addWidget(m_previewResult, 0, Qt::AlignCenter);
 
     previewImagesLayout->addLayout(p1);
@@ -277,6 +303,106 @@ void MainWindow::setupUi()
     blendLayout->addWidget(m_blendModeCombo);
     optionsLayout->addLayout(blendLayout);
 
+    // Output Size Mode
+    QHBoxLayout* outputSizeLayout = new QHBoxLayout();
+    outputSizeLayout->addWidget(new QLabel("输出尺寸:"));
+    m_outputSizeModeCombo = new QComboBox();
+    m_outputSizeModeCombo->addItem("以遮罩尺寸输出");
+    m_outputSizeModeCombo->addItem("以普通图尺寸输出");
+    m_outputSizeModeCombo->addItem("以底图尺寸输出");
+    m_outputSizeModeCombo->setCurrentIndex(1);
+    connect(m_outputSizeModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    outputSizeLayout->addWidget(m_outputSizeModeCombo);
+    optionsLayout->addLayout(outputSizeLayout);
+
+    m_tileLayersCheckbox = new QCheckBox("快速平铺开关 (开=重复平铺，关=拉伸)");
+    connect(m_tileLayersCheckbox, &QCheckBox::checkStateChanged, this, [this]() {
+        m_originalTileModeCombo->setCurrentIndex(m_tileLayersCheckbox->isChecked() ? ImageProcessor::OriginalRepeat : ImageProcessor::OriginalStretch);
+        updatePreview();
+    });
+    optionsLayout->addWidget(m_tileLayersCheckbox);
+
+    QFormLayout* tileForm = new QFormLayout();
+    tileForm->setSpacing(8);
+
+    m_originalTileModeCombo = new QComboBox();
+    m_originalTileModeCombo->addItem("拉伸匹配");
+    m_originalTileModeCombo->addItem("重复平铺");
+    m_originalTileModeCombo->addItem("镜像平铺");
+    m_originalTileModeCombo->addItem("单次定位");
+    m_originalTileModeCombo->addItem("边缘拉伸填充(Clamp)");
+    m_originalTileModeCombo->setCurrentIndex(ImageProcessor::OriginalStretch);
+    connect(m_originalTileModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        const int mode = m_originalTileModeCombo->currentIndex();
+        if (mode == ImageProcessor::OriginalStretch) {
+            m_tileLayersCheckbox->setChecked(false);
+        } else if (mode == ImageProcessor::OriginalRepeat) {
+            m_tileLayersCheckbox->setChecked(true);
+        } else {
+            updatePreview();
+        }
+    });
+    tileForm->addRow("原图模式:", m_originalTileModeCombo);
+
+    m_originalScaleModeCombo = new QComboBox();
+    m_originalScaleModeCombo->addItem("百分比缩放");
+    m_originalScaleModeCombo->addItem("自动适配单块(AutoFit)");
+    m_originalScaleModeCombo->addItem("1:1 原始像素");
+    connect(m_originalScaleModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("缩放模式:", m_originalScaleModeCombo);
+
+    m_originalScalePercentSpin = new QDoubleSpinBox();
+    m_originalScalePercentSpin->setRange(1.0, 1000.0);
+    m_originalScalePercentSpin->setSingleStep(5.0);
+    m_originalScalePercentSpin->setDecimals(1);
+    m_originalScalePercentSpin->setValue(100.0);
+    m_originalScalePercentSpin->setSuffix(" %");
+    connect(m_originalScalePercentSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("缩放比例:", m_originalScalePercentSpin);
+
+    m_originalAnchorCombo = new QComboBox();
+    m_originalAnchorCombo->addItem("居中");
+    m_originalAnchorCombo->addItem("左上");
+    m_originalAnchorCombo->addItem("右上");
+    m_originalAnchorCombo->addItem("左下");
+    m_originalAnchorCombo->addItem("右下");
+    connect(m_originalAnchorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("锚点:", m_originalAnchorCombo);
+
+    m_originalOffsetXSpin = new QSpinBox();
+    m_originalOffsetXSpin->setRange(-4096, 4096);
+    m_originalOffsetXSpin->setValue(0);
+    connect(m_originalOffsetXSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("偏移 X:", m_originalOffsetXSpin);
+
+    m_originalOffsetYSpin = new QSpinBox();
+    m_originalOffsetYSpin->setRange(-4096, 4096);
+    m_originalOffsetYSpin->setValue(0);
+    connect(m_originalOffsetYSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("偏移 Y:", m_originalOffsetYSpin);
+
+    m_originalDirectionCombo = new QComboBox();
+    m_originalDirectionCombo->addItem("X + Y");
+    m_originalDirectionCombo->addItem("仅 X");
+    m_originalDirectionCombo->addItem("仅 Y");
+    connect(m_originalDirectionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("平铺方向:", m_originalDirectionCombo);
+
+    m_originalEdgeCombo = new QComboBox();
+    m_originalEdgeCombo->addItem("裁剪");
+    m_originalEdgeCombo->addItem("透明边");
+    m_originalEdgeCombo->addItem("边缘羽化");
+    connect(m_originalEdgeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("边缘处理:", m_originalEdgeCombo);
+
+    m_originalQualityCombo = new QComboBox();
+    m_originalQualityCombo->addItem("平滑质量");
+    m_originalQualityCombo->addItem("快速预览");
+    connect(m_originalQualityCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePreview);
+    tileForm->addRow("缩放质量:", m_originalQualityCombo);
+
+    optionsLayout->addLayout(tileForm);
+
     optionsLayout->addStretch(); // Push checkbox down slightly
 
     // TGA Fix
@@ -322,7 +448,8 @@ void MainWindow::setupUi()
     mainLayout->addWidget(m_logArea);
 
     // Window Settings
-    resize(800, 650); // Slightly larger for card layout
+    resize(980, 760);
+    setMinimumSize(760, 560);
     setWindowTitle("图片批量遮罩工具By某某人"); // Simplify title
 
     // Debugging info (System Diagnostics)
@@ -349,6 +476,34 @@ void MainWindow::setupUi()
         log("TGA 插件已就绪。");
     }
     log("====================");
+}
+
+void MainWindow::setDropTargetHighlight(QLineEdit* target)
+{
+    if (m_currentDropTarget == target) {
+        return;
+    }
+
+    if (m_currentDropTarget) {
+        m_currentDropTarget->setProperty("dropTarget", false);
+        m_currentDropTarget->style()->unpolish(m_currentDropTarget);
+        m_currentDropTarget->style()->polish(m_currentDropTarget);
+        m_currentDropTarget->update();
+    }
+
+    m_currentDropTarget = target;
+
+    if (m_currentDropTarget) {
+        m_currentDropTarget->setProperty("dropTarget", true);
+        m_currentDropTarget->style()->unpolish(m_currentDropTarget);
+        m_currentDropTarget->style()->polish(m_currentDropTarget);
+        m_currentDropTarget->update();
+    }
+}
+
+void MainWindow::clearDropTargetHighlight()
+{
+    setDropTargetHighlight(nullptr);
 }
 
 void MainWindow::browseInputFolder()
@@ -411,6 +566,7 @@ void MainWindow::updatePreview()
 {
     // Check requirements
     if (m_sampleImagePath.isEmpty()) {
+        m_lastPreviewSheet = QImage();
         m_previewOriginal->setText("无样本");
         m_previewBase->setText("无底图");
         m_previewMask->setText("无遮罩");
@@ -421,6 +577,7 @@ void MainWindow::updatePreview()
     QString maskPath = m_maskFileEdit->text();
     QString basePath = m_baseFileEdit->text();
     if (maskPath.isEmpty() || !QFile::exists(maskPath)) {
+        m_lastPreviewSheet = QImage();
         m_previewBase->setText("等待底图");
         m_previewMask->setText("无遮罩");
         m_previewResult->setText("请选择\n遮罩文件");
@@ -440,6 +597,7 @@ void MainWindow::updatePreview()
     }
 
     if (basePath.isEmpty() || !QFile::exists(basePath)) {
+        m_lastPreviewSheet = QImage();
         m_previewBase->setText("无底图");
         m_previewResult->setText("请选择\n底图文件");
         return;
@@ -447,6 +605,17 @@ void MainWindow::updatePreview()
 
     int blendMode = m_blendModeCombo->currentIndex();
     bool invertTga = m_tgaAlphaInvertCheckbox->isChecked();
+    int outputSizeMode = m_outputSizeModeCombo->currentIndex();
+    int originalTileMode = m_originalTileModeCombo->currentIndex();
+    int originalScaleMode = m_originalScaleModeCombo->currentIndex();
+    double originalScalePercent = m_originalScalePercentSpin->value();
+    int originalAnchorMode = m_originalAnchorCombo->currentIndex();
+    int originalOffsetX = m_originalOffsetXSpin->value();
+    int originalOffsetY = m_originalOffsetYSpin->value();
+    int originalDirectionMode = m_originalDirectionCombo->currentIndex();
+    int originalEdgeMode = m_originalEdgeCombo->currentIndex();
+    int originalQualityMode = m_originalQualityCombo->currentIndex();
+    const QString samplePath = m_sampleImagePath;
 
     // Run preview generation in background to avoid freezing UI
     (void)QtConcurrent::run([=]() {
@@ -456,115 +625,83 @@ void MainWindow::updatePreview()
              return;
         }
 
-        // We can't access m_maskImage directly easily since it's private and we are inside MainWindow.
-        // But processor has it loaded.
-        // We need a way to get the processed image without saving to file.
-        // Update: ImageProcessor::processImage saves to file. We need a memory version.
-        // Let's modify ImageProcessor slightly or just use processImage with a temp file? 
-        // Better: refactor ImageProcessor to return QImage.
-        // For now, let's duplicate logic quickly or rely on a new method.
-        
-        // Since I can't easily change the API without reading ImageProcessor.h again,
-        // I will implement a "preview" logic here duplicating some steps or use a temp file.
-        // Actually, ImageProcessor process logic is largely in processImage.
-        // Let's stick to simple preview logic here for now to avoid breaking core.
-        
-        // Load Input
-        QImage inputImg;
-        if (m_sampleImagePath.endsWith(".blp", Qt::CaseInsensitive)) {
-             // Need BlpReader? MainWindow includes ImageProcessor.h but not BlpReader.h directly maybe?
-             // ImageProcessor.cpp includes it.
-             // Ideally ImageProcessor should expose "load" and "processInMemory".
-             // For now, let's just use QImage::load handling standard formats. 
-             // If BLP, preview might fail if no plugin.
-             inputImg.load(m_sampleImagePath);
-        } else if (m_sampleImagePath.endsWith(".tga", Qt::CaseInsensitive)) {
-             inputImg = ImageProcessor::loadTGA(m_sampleImagePath, invertTga);
-        } else {
-             inputImg.load(m_sampleImagePath);
+        if (!processor.loadBase(basePath, invertTga)) {
+            QMetaObject::invokeMethod(this, [=]() {
+                m_previewOriginal->setText("加载失败");
+                m_previewResult->setText("预览失败\n底图加载失败");
+                m_lastPreviewSheet = QImage();
+            });
+            return;
         }
 
-        if (inputImg.isNull()) return;
+        QImage resultImg;
+        QString previewError = processor.processImagePreview(
+            samplePath,
+            blendMode,
+            invertTga,
+            outputSizeMode,
+            originalTileMode,
+            originalScaleMode,
+            originalScalePercent,
+            originalAnchorMode,
+            originalOffsetX,
+            originalOffsetY,
+            originalDirectionMode,
+            originalEdgeMode,
+            originalQualityMode,
+            resultImg
+        );
 
-        // Load Mask (for visualization)
-        QImage maskImg;
-        if (maskPath.endsWith(".tga", Qt::CaseInsensitive)) {
-            maskImg = ImageProcessor::loadTGA(maskPath, invertTga); // apply invert if TGA
-        } else {
+        QImage inputImg = ImageProcessor::loadTGA(samplePath, invertTga);
+        if (inputImg.isNull()) {
+            inputImg.load(samplePath);
+        }
+
+        QImage maskImg = ImageProcessor::loadTGA(maskPath, invertTga);
+        if (maskImg.isNull()) {
             maskImg.load(maskPath);
         }
 
-        QImage baseImg;
-        if (basePath.endsWith(".tga", Qt::CaseInsensitive)) {
-            baseImg = ImageProcessor::loadTGA(basePath, invertTga);
-        } else {
+        QImage baseImg = ImageProcessor::loadTGA(basePath, invertTga);
+        if (baseImg.isNull()) {
             baseImg.load(basePath);
         }
-        
-        // Process
-        if (inputImg.format() != QImage::Format_ARGB32_Premultiplied)
-            inputImg = inputImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-
-        QImage scaledMask = maskImg.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        
-        // Generate alpha from grayscale if needed (Logic copy from ImageProcessor)
-        if (!scaledMask.hasAlphaChannel()) {
-            QImage alphaChannelMask = scaledMask.convertToFormat(QImage::Format_ARGB32);
-            for (int y = 0; y < alphaChannelMask.height(); ++y) {
-                QRgb* line = reinterpret_cast<QRgb*>(alphaChannelMask.scanLine(y));
-                for (int x = 0; x < alphaChannelMask.width(); ++x) {
-                    int alpha = qGray(line[x]);
-                    line[x] = qRgba(qRed(line[x]), qGreen(line[x]), qBlue(line[x]), alpha);
-                }
-            }
-            scaledMask = alphaChannelMask;
-        }
-
-        if (baseImg.isNull()) return;
-
-        if (baseImg.format() != QImage::Format_ARGB32_Premultiplied)
-            baseImg = baseImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        baseImg = baseImg.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-
-        QImage resultImg = baseImg;
-        QPainter painter(&resultImg);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.setRenderHint(QPainter::Antialiasing);
-
-        // Layer order: Base -> Original -> Mask
-        painter.setCompositionMode(QPainter::CompositionMode_Source);
-        painter.drawImage(0, 0, baseImg);
-        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        painter.drawImage(0, 0, inputImg);
-
-        if (blendMode == 0) { // Alpha Mask
-             painter.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-             painter.drawImage(0, 0, scaledMask);
-        } else {
-               // ... Map blend modes
-             switch (blendMode) {
-                case 1: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break;
-                case 2: painter.setCompositionMode(QPainter::CompositionMode_Multiply); break;
-                case 3: painter.setCompositionMode(QPainter::CompositionMode_Screen); break;
-                case 4: painter.setCompositionMode(QPainter::CompositionMode_Overlay); break;
-                case 5: painter.setCompositionMode(QPainter::CompositionMode_Darken); break;
-                case 6: painter.setCompositionMode(QPainter::CompositionMode_Lighten); break;
-                case 7: painter.setCompositionMode(QPainter::CompositionMode_Plus); break;
-                default: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break;
-             }
-             if (scaledMask.format() != QImage::Format_ARGB32_Premultiplied) {
-                 scaledMask = scaledMask.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-             }
-             painter.drawImage(0, 0, scaledMask);
-        }
-        painter.end();
 
         // Update UI
         QMetaObject::invokeMethod(this, [=]() {
-            m_previewOriginal->setPixmap(QPixmap::fromImage(baseImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-            m_previewBase->setPixmap(QPixmap::fromImage(inputImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-            m_previewMask->setPixmap(QPixmap::fromImage(maskImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-            m_previewResult->setPixmap(QPixmap::fromImage(resultImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            if (!baseImg.isNull()) {
+                m_previewOriginal->setPixmap(QPixmap::fromImage(baseImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            } else {
+                m_previewOriginal->setText("加载失败");
+            }
+
+            if (!inputImg.isNull()) {
+                m_previewBase->setPixmap(QPixmap::fromImage(inputImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            } else {
+                m_previewBase->setText("加载失败");
+            }
+
+            if (!maskImg.isNull()) {
+                m_previewMask->setPixmap(QPixmap::fromImage(maskImg.scaled(128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            } else {
+                m_previewMask->setText("加载失败");
+            }
+
+            if (previewError.isEmpty() && !resultImg.isNull()) {
+                m_lastPreviewSheet = resultImg;
+                m_previewResult->setPixmap(QPixmap::fromImage(resultImg.scaled(
+                    m_previewResult->size(),
+                    Qt::KeepAspectRatio,
+                    Qt::SmoothTransformation
+                )));
+            } else {
+                m_lastPreviewSheet = QImage();
+                if (!previewError.isEmpty()) {
+                    m_previewResult->setText("预览失败\n" + previewError);
+                } else {
+                    m_previewResult->setText("预览失败");
+                }
+            }
         });
 
     });
@@ -581,6 +718,16 @@ void MainWindow::startProcessing(void)
     int formatIndex = m_outputFormatCombo->currentIndex();
     int blendMode = m_blendModeCombo->currentIndex();
     bool invertTga = m_tgaAlphaInvertCheckbox->isChecked();
+    int outputSizeMode = m_outputSizeModeCombo->currentIndex();
+    int originalTileMode = m_originalTileModeCombo->currentIndex();
+    int originalScaleMode = m_originalScaleModeCombo->currentIndex();
+    double originalScalePercent = m_originalScalePercentSpin->value();
+    int originalAnchorMode = m_originalAnchorCombo->currentIndex();
+    int originalOffsetX = m_originalOffsetXSpin->value();
+    int originalOffsetY = m_originalOffsetYSpin->value();
+    int originalDirectionMode = m_originalDirectionCombo->currentIndex();
+    int originalEdgeMode = m_originalEdgeCombo->currentIndex();
+    int originalQualityMode = m_originalQualityCombo->currentIndex();
 
     if (folderPath.isEmpty() || !QDir(folderPath).exists()) {
         QMessageBox::warning(this, "错误", "无效的输入文件夹");
@@ -658,7 +805,11 @@ void MainWindow::startProcessing(void)
             QString outputName = prefix + baseName + suffix + "." + newExt;
             QString outputPath = outDir.absoluteFilePath(outputName);
 
-            QString error = processor.processImage(info.absoluteFilePath(), outputPath, blendMode, invertTga);
+            QString error = processor.processImage(info.absoluteFilePath(), outputPath, blendMode, invertTga,
+                                                  outputSizeMode, originalTileMode, originalScaleMode,
+                                                  originalScalePercent, originalAnchorMode, originalOffsetX,
+                                                  originalOffsetY, originalDirectionMode, originalEdgeMode,
+                                                  originalQualityMode);
             bool success = error.isEmpty();
             
             QString logMsg = success ? QString("已处理: %1 -> %2").arg(relPath, outputName) 
@@ -684,6 +835,41 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event)
     }
 }
 
+void MainWindow::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (!event->mimeData()->hasUrls()) {
+        clearDropTargetHighlight();
+        event->ignore();
+        return;
+    }
+
+    QWidget* hoverWidget = QApplication::widgetAt(mapToGlobal(event->position().toPoint()));
+    QLineEdit* target = nullptr;
+
+    auto hitLineEdit = [hoverWidget](QLineEdit* edit) {
+        return hoverWidget && (hoverWidget == edit || edit->isAncestorOf(hoverWidget));
+    };
+
+    if (hitLineEdit(m_inputFolderEdit)) {
+        target = m_inputFolderEdit;
+    } else if (hitLineEdit(m_outputFolderEdit)) {
+        target = m_outputFolderEdit;
+    } else if (hitLineEdit(m_maskFileEdit)) {
+        target = m_maskFileEdit;
+    } else if (hitLineEdit(m_baseFileEdit)) {
+        target = m_baseFileEdit;
+    }
+
+    setDropTargetHighlight(target);
+    event->acceptProposedAction();
+}
+
+void MainWindow::dragLeaveEvent(QDragLeaveEvent* event)
+{
+    Q_UNUSED(event);
+    clearDropTargetHighlight();
+}
+
 void MainWindow::dropEvent(QDropEvent *event)
 {
     const QMimeData* mimeData = event->mimeData();
@@ -696,7 +882,7 @@ void MainWindow::dropEvent(QDropEvent *event)
         return fi.isFile() && (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "bmp" || ext == "tga" || ext == "blp");
     };
 
-    QWidget* dropTarget = childAt(event->position().toPoint());
+    QWidget* dropTarget = QApplication::widgetAt(mapToGlobal(event->position().toPoint()));
     auto droppedOnLineEdit = [dropTarget](QLineEdit* edit) {
         return dropTarget && (dropTarget == edit || edit->isAncestorOf(dropTarget));
     };
@@ -778,5 +964,66 @@ void MainWindow::dropEvent(QDropEvent *event)
         updateSampleImage();
     }
     updatePreview();
+    clearDropTargetHighlight();
     event->acceptProposedAction();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_previewResult && event->type() == QEvent::MouseButtonDblClick) {
+        if (m_lastPreviewSheet.isNull()) {
+            return true;
+        }
+
+        QDialog dlg(this);
+        dlg.setWindowTitle("结果放大预览");
+        dlg.resize(980, 760);
+
+        QVBoxLayout* layout = new QVBoxLayout(&dlg);
+
+        const QImage img = m_lastPreviewSheet;
+        QString formatName = "Unknown";
+        switch (img.format()) {
+            case QImage::Format_ARGB32: formatName = "ARGB32"; break;
+            case QImage::Format_ARGB32_Premultiplied: formatName = "ARGB32_Premultiplied"; break;
+            case QImage::Format_RGB32: formatName = "RGB32"; break;
+            case QImage::Format_RGB888: formatName = "RGB888"; break;
+            case QImage::Format_RGBA8888: formatName = "RGBA8888"; break;
+            default: break;
+        }
+
+        const double memoryKB = static_cast<double>(img.sizeInBytes()) / 1024.0;
+        QLabel* infoLabel = new QLabel(QString(
+            "尺寸: %1 x %2    格式: %3    位深: %4-bit    Alpha: %5    内存占用: %6 KB"
+        )
+            .arg(img.width())
+            .arg(img.height())
+            .arg(formatName)
+            .arg(img.depth())
+            .arg(img.hasAlphaChannel() ? "是" : "否")
+            .arg(QString::number(memoryKB, 'f', 1)));
+        infoLabel->setStyleSheet("padding: 6px 8px; background: #F5F7FA; border: 1px solid #DFE4EA; border-radius: 4px; color: #606266;");
+        infoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        layout->addWidget(infoLabel);
+
+        QScrollArea* area = new QScrollArea(&dlg);
+        area->setWidgetResizable(false);
+        area->setAlignment(Qt::AlignCenter);
+
+        QLabel* imageLabel = new QLabel();
+        imageLabel->setPixmap(QPixmap::fromImage(m_lastPreviewSheet));
+        imageLabel->setAlignment(Qt::AlignCenter);
+        area->setWidget(imageLabel);
+
+        layout->addWidget(area);
+
+        QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+        connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        layout->addWidget(buttons);
+
+        dlg.exec();
+        return true;
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }

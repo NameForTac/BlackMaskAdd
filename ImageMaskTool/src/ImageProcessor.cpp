@@ -6,6 +6,227 @@
 #include <QFile>
 #include <QDataStream>
 #include <QBuffer>
+#include <algorithm>
+#include <cmath>
+
+namespace {
+
+QPoint centeredTopLeft(const QSize& canvasSize, const QSize& imageSize)
+{
+    return QPoint((canvasSize.width() - imageSize.width()) / 2,
+                  (canvasSize.height() - imageSize.height()) / 2);
+}
+
+QPoint anchoredTopLeft(const QSize& canvasSize, const QSize& imageSize, int anchorMode)
+{
+    switch (anchorMode) {
+        case ImageProcessor::AnchorTopLeft:
+            return QPoint(0, 0);
+        case ImageProcessor::AnchorTopRight:
+            return QPoint(canvasSize.width() - imageSize.width(), 0);
+        case ImageProcessor::AnchorBottomLeft:
+            return QPoint(0, canvasSize.height() - imageSize.height());
+        case ImageProcessor::AnchorBottomRight:
+            return QPoint(canvasSize.width() - imageSize.width(), canvasSize.height() - imageSize.height());
+        case ImageProcessor::AnchorCenter:
+        default:
+            return centeredTopLeft(canvasSize, imageSize);
+    }
+}
+
+QImage scaledByMode(const QImage& img, const QSize& canvasSize, int scaleMode, double scalePercent, bool smooth)
+{
+    if (img.isNull()) {
+        return img;
+    }
+
+    double factor = 1.0;
+    if (scaleMode == ImageProcessor::ScaleAutoFit) {
+        const double sx = static_cast<double>(canvasSize.width()) / std::max(1, img.width());
+        const double sy = static_cast<double>(canvasSize.height()) / std::max(1, img.height());
+        factor = std::max(sx, sy);
+    } else if (scaleMode == ImageProcessor::ScaleOneToOne) {
+        factor = 1.0;
+    } else {
+        factor = std::max(0.01, scalePercent / 100.0);
+    }
+
+    const int w = std::max(1, static_cast<int>(std::round(img.width() * factor)));
+    const int h = std::max(1, static_cast<int>(std::round(img.height() * factor)));
+    return img.scaled(w, h, Qt::IgnoreAspectRatio, smooth ? Qt::SmoothTransformation : Qt::FastTransformation);
+}
+
+void drawTiledLayer(QPainter& painter, const QImage& tileImg, const QSize& canvasSize,
+                    int anchorMode, int offsetX, int offsetY, int directionMode,
+                    bool mirror, bool smooth)
+{
+    if (tileImg.isNull() || tileImg.width() <= 0 || tileImg.height() <= 0) {
+        return;
+    }
+
+    QImage base = tileImg;
+    if (!smooth) {
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    }
+
+    const QPoint anchor = anchoredTopLeft(canvasSize, base.size(), anchorMode) + QPoint(offsetX, offsetY);
+    const int w = base.width();
+    const int h = base.height();
+
+    const int startX = anchor.x() - static_cast<int>(std::ceil(static_cast<double>(anchor.x()) / w)) * w;
+    const int startY = anchor.y() - static_cast<int>(std::ceil(static_cast<double>(anchor.y()) / h)) * h;
+
+    const int loopStartX = (directionMode == ImageProcessor::DirectionY) ? anchor.x() : startX;
+    const int loopEndX = (directionMode == ImageProcessor::DirectionY) ? (anchor.x() + 1) : canvasSize.width();
+    const int loopStepX = (directionMode == ImageProcessor::DirectionY) ? canvasSize.width() + 1 : w;
+
+    const int loopStartY = (directionMode == ImageProcessor::DirectionX) ? anchor.y() : startY;
+    const int loopEndY = (directionMode == ImageProcessor::DirectionX) ? (anchor.y() + 1) : canvasSize.height();
+    const int loopStepY = (directionMode == ImageProcessor::DirectionX) ? canvasSize.height() + 1 : h;
+
+    QImage flipH = base.flipped(Qt::Horizontal);
+    QImage flipV = base.flipped(Qt::Vertical);
+    QImage flipHV = base.flipped(Qt::Horizontal | Qt::Vertical);
+
+    for (int y = loopStartY; y < loopEndY; y += loopStepY) {
+        for (int x = loopStartX; x < loopEndX; x += loopStepX) {
+            if (!mirror) {
+                painter.drawImage(x, y, base);
+                continue;
+            }
+
+            const int tx = static_cast<int>(std::floor(static_cast<double>(x - startX) / w));
+            const int ty = static_cast<int>(std::floor(static_cast<double>(y - startY) / h));
+            const bool oddX = (tx & 1) != 0;
+            const bool oddY = (ty & 1) != 0;
+
+            if (oddX && oddY) {
+                painter.drawImage(x, y, flipHV);
+            } else if (oddX) {
+                painter.drawImage(x, y, flipH);
+            } else if (oddY) {
+                painter.drawImage(x, y, flipV);
+            } else {
+                painter.drawImage(x, y, base);
+            }
+        }
+    }
+}
+
+void drawClampLayer(QPainter& painter, const QImage& img, const QSize& canvasSize,
+                    int anchorMode, int offsetX, int offsetY, bool smooth)
+{
+    if (img.isNull()) {
+        return;
+    }
+
+    QImage source = img;
+    if (!smooth) {
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    }
+
+    const QPoint topLeft = anchoredTopLeft(canvasSize, source.size(), anchorMode) + QPoint(offsetX, offsetY);
+    const QRect canvasRect(QPoint(0, 0), canvasSize);
+    const QRect srcRect(topLeft, source.size());
+
+    painter.drawImage(topLeft, source);
+
+    if (!canvasRect.intersects(srcRect)) {
+        return;
+    }
+
+    if (topLeft.x() > 0) {
+        QImage leftStrip = source.copy(0, 0, 1, source.height());
+        painter.drawImage(QRect(0, topLeft.y(), topLeft.x(), source.height()), leftStrip);
+    }
+    if (srcRect.right() < canvasRect.right()) {
+        QImage rightStrip = source.copy(source.width() - 1, 0, 1, source.height());
+        painter.drawImage(QRect(srcRect.right() + 1, topLeft.y(), canvasRect.right() - srcRect.right(), source.height()), rightStrip);
+    }
+    if (topLeft.y() > 0) {
+        QImage topStrip = source.copy(0, 0, source.width(), 1);
+        painter.drawImage(QRect(topLeft.x(), 0, source.width(), topLeft.y()), topStrip);
+    }
+    if (srcRect.bottom() < canvasRect.bottom()) {
+        QImage bottomStrip = source.copy(0, source.height() - 1, source.width(), 1);
+        painter.drawImage(QRect(topLeft.x(), srcRect.bottom() + 1, source.width(), canvasRect.bottom() - srcRect.bottom()), bottomStrip);
+    }
+}
+
+void drawOriginalLayer(QPainter& painter, const QImage& img, const QSize& canvasSize,
+                       int tileMode, int scaleMode, double scalePercent, int anchorMode,
+                       int offsetX, int offsetY, int directionMode, int edgeMode,
+                       int qualityMode)
+{
+    if (img.isNull()) {
+        return;
+    }
+
+    const bool smooth = (qualityMode == ImageProcessor::QualitySmooth);
+
+    if (tileMode == ImageProcessor::OriginalStretch) {
+        if (edgeMode == ImageProcessor::EdgeTransparent) {
+            QImage fit = img.scaled(canvasSize, Qt::KeepAspectRatio, smooth ? Qt::SmoothTransformation : Qt::FastTransformation);
+            QPoint topLeft = anchoredTopLeft(canvasSize, fit.size(), anchorMode) + QPoint(offsetX, offsetY);
+            painter.drawImage(topLeft, fit);
+        } else {
+            QImage stretched = img;
+            if (img.size() != canvasSize) {
+                stretched = img.scaled(canvasSize, Qt::IgnoreAspectRatio, smooth ? Qt::SmoothTransformation : Qt::FastTransformation);
+            }
+            painter.drawImage(0, 0, stretched);
+        }
+        return;
+    }
+
+    QImage scaled = scaledByMode(img, canvasSize, scaleMode, scalePercent, smooth);
+
+    if (tileMode == ImageProcessor::OriginalCenter) {
+        QPoint topLeft = anchoredTopLeft(canvasSize, scaled.size(), anchorMode) + QPoint(offsetX, offsetY);
+        painter.drawImage(topLeft, scaled);
+    } else if (tileMode == ImageProcessor::OriginalClamp) {
+        drawClampLayer(painter, scaled, canvasSize, anchorMode, offsetX, offsetY, smooth);
+    } else if (tileMode == ImageProcessor::OriginalMirror) {
+        drawTiledLayer(painter, scaled, canvasSize, anchorMode, offsetX, offsetY, directionMode, true, smooth);
+    } else {
+        drawTiledLayer(painter, scaled, canvasSize, anchorMode, offsetX, offsetY, directionMode, false, smooth);
+    }
+
+    if (edgeMode == ImageProcessor::EdgeFeather) {
+        const int featherPx = 4;
+        QImage alphaMask(canvasSize, QImage::Format_ARGB32_Premultiplied);
+        alphaMask.fill(Qt::transparent);
+        QPainter maskPainter(&alphaMask);
+        for (int y = 0; y < canvasSize.height(); ++y) {
+            for (int x = 0; x < canvasSize.width(); ++x) {
+                int edgeDist = std::min(std::min(x, y), std::min(canvasSize.width() - 1 - x, canvasSize.height() - 1 - y));
+                int a = (edgeDist >= featherPx) ? 255 : (edgeDist * 255 / std::max(1, featherPx));
+                maskPainter.setPen(QColor(255, 255, 255, a));
+                maskPainter.drawPoint(x, y);
+            }
+        }
+        maskPainter.end();
+
+        painter.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+        painter.drawImage(0, 0, alphaMask);
+    }
+}
+
+void drawStretchLayer(QPainter& painter, const QImage& img, const QSize& canvasSize)
+{
+    if (img.isNull()) {
+        return;
+    }
+
+    if (img.size() == canvasSize) {
+        painter.drawImage(0, 0, img);
+        return;
+    }
+
+    painter.drawImage(0, 0, img.scaled(canvasSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+}
+
+}
 
 #pragma pack(push, 1)
 struct TgaHeader {
@@ -199,14 +420,14 @@ QImage ImageProcessor::loadImageHelper(const QString& path, bool invertAlpha)
     return QImage();
 }
 
-QString ImageProcessor::processImage(const QString& inputPath, const QString& outputPath, int blendMode, bool invertTgaAlpha)
+QString ImageProcessor::processImageInternal(const QString& inputPath, int blendMode, bool invertTgaAlpha,
+                                            int outputSizeMode, int originalTileMode, int originalScaleMode,
+                                            double originalScalePercent, int originalAnchorMode, int originalOffsetX,
+                                            int originalOffsetY, int originalDirectionMode, int originalEdgeMode,
+                                            int originalQualityMode, QImage& outImage)
 {
-    // Try to load
-    // Use the inversion flag for input TGA as well if desired.
-    // If user checks "Invert TGA", we assume they are working in "Warcraft Mode" 
-    // where TGA Alphas are inverted.
     QImage inputImg = loadImageHelper(inputPath, invertTgaAlpha);
-    
+
     if (inputImg.isNull()) {
         return "无法加载图片 (可能缺少格式插件): " + QFileInfo(inputPath).fileName();
     }
@@ -219,58 +440,67 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
         return "遮罩未加载。";
     }
 
-    // Convert to ARGB32_Premultiplied for best rendering performance
     if (inputImg.format() != QImage::Format_ARGB32_Premultiplied) {
         inputImg = inputImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     }
 
-    QImage baseImg = m_baseImage.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    QImage baseImg = m_baseImage;
     if (baseImg.format() != QImage::Format_ARGB32_Premultiplied) {
         baseImg = baseImg.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     }
 
-    // Scale mask to fit input image
-    QImage scaledMask = m_maskImage.scaled(inputImg.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    QImage scaledMask = m_maskImage;
+    if (scaledMask.format() != QImage::Format_ARGB32) {
+        scaledMask = scaledMask.convertToFormat(QImage::Format_ARGB32);
+    }
 
-    // If mask has no alpha (e.g. JPG, BMP without alpha), generate alpha from RGB brightness.
-    // This allows using black-and-white images as direct transparency masks.
     if (!scaledMask.hasAlphaChannel()) {
         QImage alphaChannelMask = scaledMask.convertToFormat(QImage::Format_ARGB32);
         for (int y = 0; y < alphaChannelMask.height(); ++y) {
             QRgb* line = reinterpret_cast<QRgb*>(alphaChannelMask.scanLine(y));
             for (int x = 0; x < alphaChannelMask.width(); ++x) {
-                // Use luminance (or simple average) as alpha
                 int alpha = qGray(line[x]);
-                
-                // IMPORTANT: For alpha blending, usually we want the RGB to be White (or the source color).
-                // If the mask was Black (0,0,0) and we set Alpha=0, it becomes Transparent Black.
-                // If the mask was White (255,255,255) and we set Alpha=255, it becomes Opaque White.
-                // This preserves the "Color" of the mask too.
                 line[x] = qRgba(qRed(line[x]), qGreen(line[x]), qBlue(line[x]), alpha);
             }
         }
         scaledMask = alphaChannelMask;
     }
+    if (scaledMask.format() != QImage::Format_ARGB32_Premultiplied) {
+        scaledMask = scaledMask.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    }
 
-    QImage resultImg = baseImg;
+    QSize outputSize = inputImg.size();
+    if (outputSizeMode == OutputSizeMask) {
+        outputSize = scaledMask.size();
+    } else if (outputSizeMode == OutputSizeBase) {
+        outputSize = baseImg.size();
+    }
+
+    if (!outputSize.isValid()) {
+        return "输出尺寸无效。";
+    }
+
+    QImage resultImg(outputSize, QImage::Format_ARGB32_Premultiplied);
+    resultImg.fill(Qt::transparent);
+
     QPainter painter(&resultImg);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    // Layer order: Base (bottom) -> Original -> Mask (top).
-    painter.setCompositionMode(QPainter::CompositionMode_Source);
-    painter.drawImage(0, 0, baseImg);
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.drawImage(0, 0, inputImg);
+    drawStretchLayer(painter, baseImg, outputSize);
 
-    if (blendMode == 0) { // Alpha Mask Mode (DestinationIn)
-        // Top mask controls final alpha of the current stack.
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    drawOriginalLayer(painter, inputImg, outputSize,
+                      originalTileMode, originalScaleMode, originalScalePercent,
+                      originalAnchorMode, originalOffsetX, originalOffsetY,
+                      originalDirectionMode, originalEdgeMode, originalQualityMode);
+
+    if (blendMode == 0) {
         painter.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-        painter.drawImage(0, 0, scaledMask);
-        
+        drawStretchLayer(painter, scaledMask, outputSize);
     } else {
-         // Draw mask as the top layer with selected blend mode.
-         switch (blendMode) {
+        switch (blendMode) {
             case 1: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break; // Normal
             case 2: painter.setCompositionMode(QPainter::CompositionMode_Multiply); break;   // Multiply
             case 3: painter.setCompositionMode(QPainter::CompositionMode_Screen); break;     // Screen
@@ -279,27 +509,52 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
             case 6: painter.setCompositionMode(QPainter::CompositionMode_Lighten); break;    // Lighten
             case 7: painter.setCompositionMode(QPainter::CompositionMode_Plus); break;       // Add
             default: painter.setCompositionMode(QPainter::CompositionMode_SourceOver); break;
-         }
-         
-         if (scaledMask.format() != QImage::Format_ARGB32_Premultiplied) {
-             scaledMask = scaledMask.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-         }
-         painter.drawImage(0, 0, scaledMask);
+        }
+        drawStretchLayer(painter, scaledMask, outputSize);
     }
-    
-    painter.end();
 
-    // Custom TGA Writer Logic
+    painter.end();
+    outImage = resultImg;
+
+    return QString();
+}
+
+QString ImageProcessor::processImagePreview(const QString& inputPath, int blendMode, bool invertTgaAlpha,
+                                            int outputSizeMode, int originalTileMode, int originalScaleMode,
+                                            double originalScalePercent, int originalAnchorMode, int originalOffsetX,
+                                            int originalOffsetY, int originalDirectionMode, int originalEdgeMode,
+                                            int originalQualityMode, QImage& outImage)
+{
+    return processImageInternal(inputPath, blendMode, invertTgaAlpha,
+                                outputSizeMode, originalTileMode, originalScaleMode,
+                                originalScalePercent, originalAnchorMode, originalOffsetX,
+                                originalOffsetY, originalDirectionMode, originalEdgeMode,
+                                originalQualityMode, outImage);
+}
+
+QString ImageProcessor::processImage(const QString& inputPath, const QString& outputPath, int blendMode, bool invertTgaAlpha,
+                                    int outputSizeMode, int originalTileMode, int originalScaleMode,
+                                    double originalScalePercent, int originalAnchorMode, int originalOffsetX,
+                                    int originalOffsetY, int originalDirectionMode, int originalEdgeMode,
+                                    int originalQualityMode)
+{
+    QImage resultImg;
+    QString processError = processImageInternal(inputPath, blendMode, invertTgaAlpha,
+                                                outputSizeMode, originalTileMode, originalScaleMode,
+                                                originalScalePercent, originalAnchorMode, originalOffsetX,
+                                                originalOffsetY, originalDirectionMode, originalEdgeMode,
+                                                originalQualityMode, resultImg);
+    if (!processError.isEmpty()) {
+        return processError;
+    }
+
     if (outputPath.endsWith(".tga", Qt::CaseInsensitive)) {
         QImage saveImg = resultImg;
-        
-        // Ensure format is ARGB32 (non-premultiplied)
+
         if (saveImg.format() != QImage::Format_ARGB32) {
              saveImg = saveImg.convertToFormat(QImage::Format_ARGB32);
         }
 
-        // [Requirement] Export to PNG then to TGA
-        // This acts as a sanitization step requested by user
         QByteArray pngData;
         QBuffer buffer(&pngData);
         buffer.open(QIODevice::WriteOnly);
@@ -313,11 +568,8 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
                 }
             }
         }
-        
-        // writeTGA is defined at the top of this file
-        // Also apply alpha inversion if requested
+
         if (invertTgaAlpha) {
-            // Invert Alpha for the output image
             int w = saveImg.width();
             int h = saveImg.height();
             for (int y = 0; y < h; ++y) {
@@ -335,7 +587,6 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
         }
 
     } else if (outputPath.endsWith(".blp", Qt::CaseInsensitive)) {
-        // Use custom BLP Writer
          QImage saveImg = resultImg;
          BlpReader blpWriter;
          if (blpWriter.write(saveImg, outputPath)) {
@@ -345,7 +596,6 @@ QString ImageProcessor::processImage(const QString& inputPath, const QString& ou
          }
 
     } else {
-        // Standard save for other formats
         if (resultImg.save(outputPath)) {
             return QString();
         } else {

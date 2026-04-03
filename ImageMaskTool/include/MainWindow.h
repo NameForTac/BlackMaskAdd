@@ -7,6 +7,8 @@
 #include <QTextEdit>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QSpinBox>
+#include <QDoubleSpinBox>
 
 class QLabel;
 
@@ -20,7 +22,10 @@ public:
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void browseInputFolder();
@@ -34,6 +39,8 @@ private:
     void setupUi();
     void log(const QString& message);
     void updateSampleImage();
+    void setDropTargetHighlight(QLineEdit* target);
+    void clearDropTargetHighlight();
 
     QLineEdit* m_inputFolderEdit;
     QLineEdit* m_outputFolderEdit;
@@ -43,7 +50,18 @@ private:
     QLineEdit* m_suffixEdit;
     QComboBox* m_outputFormatCombo;
     QComboBox* m_blendModeCombo;
+    QComboBox* m_outputSizeModeCombo;
+    QComboBox* m_originalTileModeCombo;
+    QComboBox* m_originalScaleModeCombo;
+    QDoubleSpinBox* m_originalScalePercentSpin;
+    QComboBox* m_originalAnchorCombo;
+    QSpinBox* m_originalOffsetXSpin;
+    QSpinBox* m_originalOffsetYSpin;
+    QComboBox* m_originalDirectionCombo;
+    QComboBox* m_originalEdgeCombo;
+    QComboBox* m_originalQualityCombo;
     QCheckBox* m_tgaAlphaInvertCheckbox; 
+    QCheckBox* m_tileLayersCheckbox;
     QPushButton* m_startBtn;
     QProgressBar* m_progressBar;
     QTextEdit* m_logArea;
@@ -54,4 +72,6 @@ private:
     QLabel* m_previewBase;
     QLabel* m_previewMask;
     QLabel* m_previewResult;
+    QImage m_lastPreviewSheet;
+    QLineEdit* m_currentDropTarget;
 };
